@@ -1,0 +1,29 @@
+name: Sync Markdown to Feishu Wiki
+on:
+  push:
+    branches: [ main ]   # 可根据需要修改分支
+    paths:
+      - '**.md'          # 仅当 .md 文件变动时触发
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 获取完整历史，用于判断文件变更
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run sync script
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_SPACE_ID: ${{ secrets.FEISHU_SPACE_ID }}
+        run: python sync_to_feishu.py
