@@ -60,14 +60,13 @@ def get_space_root_node(token):
 
 
 def find_node_by_path(token, path_parts):
-    """根据路径查找节点，返回节点 token，若不存在返回 None
+    """根据路径查找节点，返回节点信息字典，若不存在返回 None
     path_parts: list of folder names + file name (不含 .md 后缀)
     """
-    current_parent_token = PARENT_NODE_TOKEN  # 初始父节点，None 表示从空间根目录开始
+    current_parent_token = PARENT_NODE_TOKEN
 
     # 逐层查找
     for i, name in enumerate(path_parts):
-        # 获取当前父节点下的子节点
         url = f"{FEISHU_HOST}/wiki/v2/spaces/{SPACE_ID}/nodes"
         headers = {"Authorization": f"Bearer {token}"}
         params = {"page_size": 50}
@@ -85,15 +84,12 @@ def find_node_by_path(token, path_parts):
             
             items = data.get("data", {}).get("items", [])
             for item in items:
-                # 节点名称（标题）
-                title = item.get("title", "")
-                if title == name:
+                if item.get("title") == name:
                     found = item
                     break
             if found:
                 break
             
-            # 分页处理
             page_token = data.get("data", {}).get("page_token")
             has_more = data.get("data", {}).get("has_more", False)
             if not page_token or not has_more:
@@ -103,39 +99,29 @@ def find_node_by_path(token, path_parts):
         if not found:
             return None
             
-        # 找到当前层的节点，继续往下找
         current_parent_token = found["node_token"]
         
         if i == len(path_parts) - 1:
-            # 最后一个部分，返回找到的节点 token
-            return found["node_token"]
+            # 返回完整的节点信息，包含 node_token, obj_token, obj_type 等
+            return found
             
     return None
 
 
 def create_node(token, parent_node_token, title, node_type, content=None):
-    """创建节点
-    node_type (作为 obj_type): 'docx'（推荐）
-    """
+    """创建节点"""
     url = f"{FEISHU_HOST}/wiki/v2/spaces/{SPACE_ID}/nodes"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
-    # 根据飞书 API 校验要求，node_type (表示节点类型，origin 为原创) 是必填或建议填写的
     payload = {
         "obj_type": node_type,
-        "node_type": "origin",  # 明确指定为原创节点
+        "node_type": "origin",
         "title": title
     }
     if parent_node_token:
         payload["parent_node_token"] = parent_node_token
-        
-    # 如果是创建文档且有内容
-    if node_type == "docx" and content:
-        # Wiki API 创建节点时不支持直接传内容，需要先创建再更新，
-        # 或者使用特殊的导入接口。这里为了简单，先创建空文档，再调用更新接口。
-        pass
         
     resp = requests.post(url, headers=headers, json=payload)
     if resp.status_code != 200:
@@ -144,28 +130,20 @@ def create_node(token, parent_node_token, title, node_type, content=None):
     if data.get("code") != 0:
         raise Exception(f"创建节点失败 (Code {data.get('code')}): {data.get('msg')}")
     
-    node_token = data["data"]["node"]["node_token"]
-    
-    # 如果有内容，创建后更新
-    if content:
-        update_document_content(token, node_token, content)
-        
-    return node_token
-
-
-def update_document_content(token, node_token, content):
-    """更新文档内容（支持 Markdown）"""
-    # 先获取文档 ID，因为更新内容需要 document_id
-    url = f"{FEISHU_HOST}/wiki/v2/nodes/{node_token}"
-    headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers)
-    if resp.status_code != 200:
-        raise Exception(f"获取节点信息失败 (HTTP {resp.status_code}): {resp.text}")
-    data = resp.json()
-    if data.get("code") != 0:
-        raise Exception(f"获取节点信息失败 (Code {data.get('code')}): {data.get('msg')}")
-    
     node_data = data["data"]["node"]
+    
+    # 如果有内容，创建后更新内容
+    if content:
+        update_document_content(token, node_data, content)
+        
+    return node_data
+
+
+def update_document_content(token, node_data, content):
+    """更新文档内容
+    node_data: 节点信息字典，需包含 node_token, obj_token, obj_type
+    """
+    node_token = node_data["node_token"]
     obj_token = node_data["obj_token"]
     obj_type = node_data["obj_type"]
     
@@ -175,7 +153,10 @@ def update_document_content(token, node_token, content):
 
     # 更新文档内容
     update_url = f"{FEISHU_HOST}/docx/v1/documents/{obj_token}/raw_content"
-    headers["Content-Type"] = "application/json"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
     payload = {"content": content}
     resp = requests.put(update_url, headers=headers, json=payload)
     if resp.status_code != 200:
@@ -187,45 +168,41 @@ def update_document_content(token, node_token, content):
 
 
 def sync_file(file_path, token):
-    """同步单个 Markdown 文件到知识库"""
+    """同步单个 Markdown 文件"""
     rel_path = file_path.relative_to(ROOT_DIR)
-    # 将路径拆分为目录和文件名（不含 .md 后缀）
     parts = list(rel_path.parts)
     if parts[-1].endswith(".md"):
-        filename = parts[-1][:-3]   # 去掉 .md
-        parts[-1] = filename
+        parts[-1] = parts[-1][:-3]
     else:
-        # 非 .md 文件跳过
         return
 
-    # 读取 Markdown 内容
     with open(file_path, "r", encoding="utf-8") as f:
         content = f.read()
 
     # 查找节点
-    node_token = find_node_by_path(token, parts)
-    if node_token:
+    node_info = find_node_by_path(token, parts)
+    if node_info:
         # 更新内容
-        update_document_content(token, node_token, content)
+        update_document_content(token, node_info, content)
         print(f"已更新: {rel_path}")
     else:
         # 创建节点（需要逐层创建文件夹）
-        current_parent = PARENT_NODE_TOKEN  # 初始父节点，None 表示空间根目录
+        current_parent_token = PARENT_NODE_TOKEN
 
-        # 创建路径上的所有文件夹
+        # 创建路径上的所有中间节点（作为父文件夹）
         for i, name in enumerate(parts[:-1]):
-            # 查找当前层是否存在该文件夹
+            # 查找当前层是否存在该节点
             found = find_node_by_path(token, parts[:i+1])
             if found:
-                current_parent = found
+                current_parent_token = found["node_token"]
             else:
-                # 创建文件夹（Wiki 中文件夹也是一种文档，通常用 docx 即可）
-                folder_token = create_node(token, current_parent, name, "docx")
-                current_parent = folder_token
-                print(f"创建文件夹节点: {name}")
+                # 创建中间节点
+                new_node = create_node(token, current_parent_token, name, "docx")
+                current_parent_token = new_node["node_token"]
+                print(f"创建中间节点: {name}")
 
-        # 创建文档
-        doc_token = create_node(token, current_parent, parts[-1], "docx", content=content)
+        # 创建最终文档节点
+        create_node(token, current_parent_token, parts[-1], "docx", content=content)
         print(f"创建文档: {rel_path}")
 
 
